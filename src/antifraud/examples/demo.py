@@ -36,6 +36,9 @@ def main() -> None:
         association_event(
             IdentityAssociation("link-bc", "B", "C", 10), source=SOURCE
         ),
+        association_event(
+            IdentityAssociation("link-ca", "C", "A", 20), source=SOURCE
+        ),
         transaction_event(
             Transaction("t1", "A", "B", 500),
             occurred_at=100,
@@ -44,6 +47,11 @@ def main() -> None:
         transaction_event(
             Transaction("t2", "B", "C", 500),
             occurred_at=200,
+            source=SOURCE,
+        ),
+        transaction_event(
+            Transaction("t3", "C", "A", 500),
+            occurred_at=210,
             source=SOURCE,
         ),
     ]
@@ -67,6 +75,29 @@ def main() -> None:
     )
     for decision in restored_decisions:
         print("restored", decision.cause.value, decision.evidence.status.value)
+
+    engine.grant_rule_exception(
+        "evt-t2",
+        "accepted merchant exception",
+        operator="analyst-demo",
+        decided_at=270,
+        judgment_id="demo-exception-t2",
+    )
+    active_hit = engine.active_hits()[0] if engine.active_hits() else None
+    if active_hit is None:
+        raise RuntimeError("demo expected an active overlapping hit")
+    explanation = engine.explain_hit(active_hit.hit_id)
+    print("rule:", explanation.rule.qualified_name)
+    print("raw amount:", explanation.hit.original_total_amount)
+    print("effective amount:", explanation.hit.total_amount)
+    print(
+        "active judgments:",
+        [judgment.id for judgment in explanation.active_manual_judgments],
+    )
+    engine.withdraw_manual_judgment(
+        "demo-exception-t2",
+        withdrawn_at=280,
+    )
 
     engine.replace_rule(
         "cross_identity_flow",

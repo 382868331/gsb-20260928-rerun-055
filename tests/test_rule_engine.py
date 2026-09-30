@@ -397,6 +397,163 @@ class CrossIdentityFlowRuleTest(unittest.TestCase):
         self.assertEqual(sealed.transaction_ids, ("t1", "t2"))
         self.assertEqual(sealed.excluded_event_ids, ())
 
+    def test_overlapping_judgments_withdraw_only_their_own_effect(self) -> None:
+        def arrange(engine: RuleEngine) -> None:
+            engine.ingest_many(
+                [
+                    link("link-ab", "A", "B"),
+                    link("link-bc", "B", "C"),
+                    link("link-ca", "C", "A"),
+                    tx("t1", "A", "B", 500, 100),
+                    tx("t2", "B", "C", 100, 150),
+                    tx("t3", "C", "A", 500, 200),
+                ]
+            )
+
+        for first_withdrawal, second_withdrawal in (
+            ("split", "exception"),
+            ("exception", "split"),
+        ):
+            with self.subTest(first_withdrawal=first_withdrawal):
+                engine = build_engine()
+                arrange(engine)
+                exception = engine.grant_rule_exception(
+                    "evt-t2",
+                    "accepted merchant exception",
+                    operator="analyst-1",
+                    decided_at=220,
+                    judgment_id="exception-t2",
+                )
+                split = engine.split_identity_link(
+                    "evt-link-bc",
+                    "B and C are separate people",
+                    operator="analyst-2",
+                    decided_at=230,
+                    judgment_id="split-bc",
+                )
+
+                self.assertEqual(len(exception), 1)
+                self.assertEqual(
+                    exception[0].evidence.total_amount, 1000.0
+                )
+                self.assertEqual(
+                    exception[0].evidence.original_total_amount, 1100.0
+                )
+                self.assertEqual(len(split), 1)
+                self.assertEqual(split[0].evidence.status, DecisionStatus.OPEN)
+                self.assertEqual(
+                    split[0].evidence.transaction_ids, ("t1", "t3")
+                )
+                self.assertEqual(
+                    split[0].evidence.association_ids,
+                    ("link-ab", "link-ca"),
+                )
+                self.assertEqual(
+                    split[0].evidence.original_association_ids,
+                    ("link-ab", "link-bc", "link-ca"),
+                )
+                self.assertEqual(len(engine.active_hits()), 1)
+
+                if first_withdrawal == "split":
+                    decisions = engine.withdraw_manual_judgment(
+                        "split-bc",
+                        withdrawn_at=240,
+                    )
+                    self.assertEqual(
+                        decisions[0].evidence.total_amount, 1000.0
+                    )
+                    self.assertEqual(
+                        decisions[0].evidence.transaction_ids,
+                        ("t1", "t3"),
+                    )
+                    self.assertEqual(
+                        decisions[0].evidence.original_transaction_ids,
+                        ("t1", "t2", "t3"),
+                    )
+                    self.assertEqual(len(engine.active_hits()), 1)
+                    restored = engine.withdraw_manual_judgment(
+                        "exception-t2",
+                        withdrawn_at=250,
+                    )
+                else:
+                    still_split = engine.withdraw_manual_judgment(
+                        "exception-t2",
+                        withdrawn_at=240,
+                    )
+                    self.assertEqual(len(still_split), 1)
+                    self.assertEqual(
+                        still_split[0].evidence.total_amount, 1100.0
+                    )
+                    self.assertEqual(
+                        still_split[0].evidence.transaction_ids,
+                        ("t1", "t2", "t3"),
+                    )
+                    self.assertEqual(
+                        still_split[0].evidence.association_ids,
+                        ("link-ab", "link-ca"),
+                    )
+                    restored = engine.withdraw_manual_judgment(
+                        "split-bc",
+                        withdrawn_at=250,
+                    )
+
+                self.assertEqual(len(restored), 1)
+                hit = restored[0].evidence
+                self.assertEqual(hit.total_amount, 1100.0)
+                self.assertEqual(
+                    hit.transaction_ids, ("t1", "t2", "t3")
+                )
+                self.assertEqual(
+                    tuple(
+                        judgment.id
+                        for judgment in hit.active_manual_judgments
+                    ),
+                    (),
+                )
+                self.assertEqual(len(hit.manual_judgments), 2)
+
+    def test_explanation_lists_raw_material_rule_and_active_decisions(self) -> None:
+        engine = build_engine()
+        engine.ingest_many(
+            [
+                link("link-ab", "A", "B"),
+                link("link-bc", "B", "C"),
+                link("link-ca", "C", "A"),
+                tx("t1", "A", "B", 500, 100),
+                tx("t2", "B", "C", 100, 150),
+                tx("t3", "C", "A", 500, 200),
+            ]
+        )
+        engine.grant_rule_exception(
+            "evt-t2",
+            "accepted merchant exception",
+            operator="analyst-1",
+            decided_at=220,
+            judgment_id="exception-t2",
+        )
+
+        hit = engine.active_hits()[0]
+        explanation = engine.explain_hit(hit.hit_id)
+
+        self.assertIsNotNone(explanation)
+        assert explanation is not None
+        self.assertEqual(explanation.rule.qualified_name, "cross_identity_flow@v1")
+        self.assertEqual(
+            tuple(event.event_id for event in explanation.original_transactions),
+            ("evt-t1", "evt-t2", "evt-t3"),
+        )
+        self.assertEqual(
+            tuple(event.event_id for event in explanation.effective_transactions),
+            ("evt-t1", "evt-t3"),
+        )
+        self.assertEqual(
+            tuple(
+                judgment.id
+                for judgment in explanation.active_manual_judgments
+            ),
+            ("exception-t2",),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,8 +10,9 @@
 - 乱序修正：窗口封存前，迟到事件会触发同一命中的重新计算和更新。
 - 撤销传播：交易事件被撤销后，依赖该交易的命中会转为 `revoked`。
 - 命中证据：保存身份、交易、身份关联以及具体触发事件，不只输出风险分。
-- 人工证据排除：分析人员可否定交易或身份关联，原始事件仍保留，命中重算并记录理由。
-- 人工撤回恢复：撤回人工否定后，系统按当前有效证据恢复原计算。
+- 重叠人工判断：同一证据可同时存在误报排除、身份拆分和规则例外，各自带独立判断 ID。
+- 人工撤回恢复：只撤回指定判断并恢复它实际影响的金额或身份链，其他判断继续生效。
+- 命中解释：当前证据同时保留原始交易/关联、生效交易/关联、规则版本和有效人工决定。
 - 历史重评：开放窗口内迟到资料继续修正当前命中；封存后的证据、人工或规则变化另成版本。
 - 原因区分：每次变化标记为 `evidence`、`manual`、`rule` 或 `seal`。
 - 模型扩展：`HeuristicModel` 是确定性占位模型，可将分数附加到规则证据。
@@ -63,11 +64,26 @@ engine.exclude_evidence(
     operator="analyst-1",
     decided_at=250,
 )
+engine.grant_rule_exception(
+    "evt-t1",
+    "accepted merchant case",
+    operator="analyst-2",
+    decided_at=270,
+    judgment_id="exception-t1",
+)
+engine.withdraw_manual_judgment(
+    "exception-t1",
+    withdrawn_at=280,
+    reason="exception no longer applies",
+)
 engine.withdraw_evidence_judgment(
     "evt-t1",
     withdrawn_at=260,
     reason="evidence verified",
 )
+explanation = engine.explain_hit(engine.active_hits()[0].hit_id)
+print(explanation.original_transactions)
+print(explanation.active_manual_judgments)
 
 # 用新版本规则重算，历史记录保留变化原因
 engine.replace_rule(
