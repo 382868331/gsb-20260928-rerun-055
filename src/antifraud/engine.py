@@ -8,6 +8,7 @@ from .models import (
     ChangeCause,
     DecisionStatus,
     HitEvidence,
+    JudgmentKind,
     ManualEvidenceJudgment,
 )
 from .rules import CrossIdentityFlowRule, RuleDecision
@@ -37,6 +38,7 @@ class RuleEngine:
         self.sealing_grace_seconds = sealing_grace_seconds
         self._events_by_id: dict[str, EventEnvelope] = {}
         self._revoked_event_ids: set[str] = set()
+        # Keyed by judgment_id; several judgments may overlap on one event.
         self._manual_judgments: dict[str, ManualEvidenceJudgment] = {}
         self._latest_seen_at = 0
         self._evidence: dict[str, HitEvidence] = {}
@@ -71,19 +73,30 @@ class RuleEngine:
         *,
         operator: str,
         decided_at: int,
+        kind: JudgmentKind = JudgmentKind.GENERIC,
+        rule_id: str | None = None,
+        judgment_id: str | None = None,
     ) -> list[RuleDecision]:
         if not reason:
             raise ValueError("reason is required")
         if not operator:
             raise ValueError("operator is required")
-        existing = self._manual_judgments.get(event_id)
+        if rule_id is not None and not any(
+            rule.version_info.rule_id == rule_id for rule in self.rules
+        ):
+            raise KeyError(rule_id)
+        judgment_id = judgment_id or self._next_judgment_id(event_id)
+        existing = self._manual_judgments.get(judgment_id)
         if existing is not None and existing.active:
             return []
-        self._manual_judgments[event_id] = ManualEvidenceJudgment(
+        self._manual_judgments[judgment_id] = ManualEvidenceJudgment(
             event_id=event_id,
             reason=reason,
             operator=operator,
             decided_at=decided_at,
+            judgment_id=judgment_id,
+            kind=kind,
+            rule_id=rule_id,
         )
         self._latest_seen_at = max(self._latest_seen_at, decided_at)
         return self._recompute(
@@ -93,17 +106,37 @@ class RuleEngine:
             reason=reason,
         )
 
+    def _next_judgment_id(self, event_id: str) -> str:
+        if event_id not in self._manual_judgments:
+            return event_id
+        sequence = 2
+        while f"{event_id}#{sequence}" in self._manual_judgments:
+            sequence += 1
+        return f"{event_id}#{sequence}"
+
     def withdraw_evidence_judgment(
         self,
-        event_id: str,
+        judgment_ref: str,
         *,
         withdrawn_at: int,
         reason: str | None = None,
     ) -> list[RuleDecision]:
-        existing = self._manual_judgments.get(event_id)
+        existing = self._manual_judgments.get(judgment_ref)
+        if existing is None:
+            matches = [
+                judgment
+                for judgment in self._manual_judgments.values()
+                if judgment.event_id == judgment_ref and judgment.active
+            ]
+            if len(matches) > 1:
+                raise ValueError(
+                    "multiple active judgments on "
+                    f"{judgment_ref}; withdraw by judgment_id"
+                )
+            existing = matches[0] if matches else None
         if existing is None or not existing.active:
             return []
-        self._manual_judgments[event_id] = existing.withdrawn(
+        self._manual_judgments[existing.effective_id] = existing.withdrawn(
             withdrawn_at,
             reason,
         )
@@ -112,7 +145,7 @@ class RuleEngine:
             cause=ChangeCause.MANUAL,
             changed_at=withdrawn_at,
             actor=existing.operator,
-            reason=reason or f"withdraw:{event_id}",
+            reason=reason or f"withdraw:{existing.effective_id}",
         )
 
     def replace_rule(
@@ -167,6 +200,53 @@ class RuleEngine:
     def hit(self, hit_id: str) -> HitEvidence | None:
         return self._evidence.get(hit_id)
 
+    def explain_hit(self, hit_id: str) -> dict[str, object] | None:
+        evidence = self._evidence.get(hit_id)
+        if evidence is None:
+            return None
+        trigger_ids = self._evidence_event_ids(evidence)
+        original_events = tuple(
+            event
+            for event in self.raw_events()
+            if event.event_id in trigger_ids
+        )
+        participating_judgments = tuple(
+            judgment
+            for judgment in self.manual_judgments()
+            if judgment.event_id in trigger_ids
+            and judgment.applies_to_rule(evidence.rule.rule_id)
+        )
+        revision_ids = tuple(
+            revision["revision_id"]
+            for revision in self.revisions
+            if revision["current"].hit_id == hit_id
+            or (
+                revision["previous"] is not None
+                and revision["previous"].hit_id == hit_id
+            )
+        )
+        return {
+            "hit_id": evidence.hit_id,
+            "status": evidence.status,
+            "rule": evidence.rule.qualified_name,
+            "window_start": evidence.window_start,
+            "window_end": evidence.window_end,
+            "identities": evidence.identities,
+            "total_amount": evidence.total_amount,
+            "transaction_ids": evidence.transaction_ids,
+            "association_ids": evidence.association_ids,
+            "trigger_events": evidence.trigger_events,
+            "original_events": original_events,
+            "excluded_event_ids": evidence.excluded_event_ids,
+            "active_manual_judgments": tuple(
+                judgment
+                for judgment in participating_judgments
+                if judgment.active
+            ),
+            "manual_judgments": participating_judgments,
+            "revision_ids": revision_ids,
+        }
+
     def hit_history(self) -> list[dict[str, object]]:
         return list(self.revisions)
 
@@ -188,24 +268,29 @@ class RuleEngine:
             if not event.is_revocation
             and event.event_id not in self._revoked_event_ids
         ]
-        excluded_event_ids = {
-            event_id
-            for event_id, judgment in self._manual_judgments.items()
+        active_judgments = [
+            judgment
+            for judgment in self._manual_judgments.values()
             if judgment.active
-        }
-        effective_events = [
-            event
-            for event in raw_active_events
-            if event.event_id not in excluded_event_ids
         ]
+        excluded_event_ids = {
+            judgment.event_id for judgment in active_judgments
+        }
 
         evaluated: dict[str, HitEvidence] = {}
         for rule in self.rules:
+            rule_excluded_ids = {
+                judgment.event_id
+                for judgment in active_judgments
+                if judgment.applies_to_rule(rule.version_info.rule_id)
+            }
+            effective_events = [
+                event
+                for event in raw_active_events
+                if event.event_id not in rule_excluded_ids
+            ]
             for hit_id, evidence in rule.evaluate(effective_events).items():
-                evidence = self._apply_manual_context(
-                    evidence,
-                    excluded_event_ids=excluded_event_ids,
-                )
+                evidence = self._apply_manual_context(evidence)
                 if evidence.window_end < seal_before:
                     evidence = evidence.sealed()
                 evaluated[hit_id] = evidence
@@ -251,10 +336,7 @@ class RuleEngine:
             if previous is not None:
                 consumed_previous_ids.add(previous.hit_id)
                 next_evidence = self._carry_model_score(previous, next_evidence)
-                next_evidence = self._apply_manual_context(
-                    next_evidence,
-                    excluded_event_ids=excluded_event_ids,
-                )
+                next_evidence = self._apply_manual_context(next_evidence)
             decision_cause = cause
             if (
                 previous is not None
@@ -304,7 +386,6 @@ class RuleEngine:
                 )
                 next_evidence = self._apply_manual_context(
                     previous.revoked(),
-                    excluded_event_ids=excluded_event_ids,
                 )
                 next_evidence = replace(
                     next_evidence,
@@ -326,15 +407,11 @@ class RuleEngine:
                     reason=reason,
                 )
                 continue
-            if previous.status in (
-                DecisionStatus.REVOKED,
-                DecisionStatus.REVISED,
-            ):
+            if previous.status == DecisionStatus.REVOKED:
                 current[previous.hit_id] = previous
                 continue
             next_evidence = self._apply_manual_context(
                 previous.revoked(),
-                excluded_event_ids=excluded_event_ids,
             )
             decision_cause = (
                 ChangeCause.MANUAL
@@ -366,17 +443,27 @@ class RuleEngine:
     def _apply_manual_context(
         self,
         evidence: HitEvidence,
-        *,
-        excluded_event_ids: set[str],
+        excluded_event_ids: set[str] | None = None,
     ) -> HitEvidence:
         evidence_event_ids = self._evidence_event_ids(evidence)
+        if excluded_event_ids is None:
+            excluded_event_ids = {
+                judgment.event_id
+                for judgment in self._manual_judgments.values()
+                if judgment.active
+                and judgment.applies_to_rule(evidence.rule.rule_id)
+            }
         applied_exclusions = tuple(
             sorted(excluded_event_ids.intersection(evidence_event_ids))
         )
         judgments = tuple(
             judgment
-            for event_id, judgment in sorted(self._manual_judgments.items())
-            if event_id in evidence_event_ids
+            for judgment in sorted(
+                self._manual_judgments.values(),
+                key=lambda judgment: judgment.effective_id,
+            )
+            if judgment.event_id in evidence_event_ids
+            and judgment.applies_to_rule(evidence.rule.rule_id)
         )
         return replace(
             evidence,
@@ -456,7 +543,10 @@ class RuleEngine:
             evidence.excluded_event_ids,
             tuple(
                 (
+                    judgment.effective_id,
                     judgment.event_id,
+                    judgment.kind,
+                    judgment.rule_id,
                     judgment.reason,
                     judgment.operator,
                     judgment.decided_at,

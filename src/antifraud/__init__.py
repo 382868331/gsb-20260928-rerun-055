@@ -2,7 +2,12 @@
 
 from .engine import RuleEngine
 from .events import EventEnvelope, IdentityAssociation, Transaction
-from .models import ChangeCause, DecisionStatus, ManualEvidenceJudgment
+from .models import (
+    ChangeCause,
+    DecisionStatus,
+    JudgmentKind,
+    ManualEvidenceJudgment,
+)
 from .rules import CrossIdentityFlowRule, RuleDecision
 
 __all__ = [
@@ -11,6 +16,7 @@ __all__ = [
     "DecisionStatus",
     "EventEnvelope",
     "IdentityAssociation",
+    "JudgmentKind",
     "ManualEvidenceJudgment",
     "RuleDecision",
     "RuleEngine",

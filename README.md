@@ -12,6 +12,10 @@
 - 命中证据：保存身份、交易、身份关联以及具体触发事件，不只输出风险分。
 - 人工证据排除：分析人员可否定交易或身份关联，原始事件仍保留，命中重算并记录理由。
 - 人工撤回恢复：撤回人工否定后，系统按当前有效证据恢复原计算。
+- 重叠人工判断：同一事件可叠加多条人工判断（误报排除、身份拆分、规则例外等），各自带 `judgment_id` 与 `kind`；撤回其中一条只恢复它实际影响的部分，其余仍生效的判断继续参与计算。
+- 规则例外范围：人工判断可通过 `rule_id` 限定只作用于某条规则，其他规则的命中不受影响。
+- 命中解释：`explain_hit` 列出原始事件、规则版本、生效与已撤回的人工判断以及相关修订编号，解释金额或身份链变化的原因。
+- 撤回顺序无关：最终状态只取决于当前有效判断集合，按不同顺序撤回得到一致结果。
 - 历史重评：开放窗口内迟到资料继续修正当前命中；封存后的证据、人工或规则变化另成版本。
 - 原因区分：每次变化标记为 `evidence`、`manual`、`rule` 或 `seal`。
 - 模型扩展：`HeuristicModel` 是确定性占位模型，可将分数附加到规则证据。
@@ -68,6 +72,31 @@ engine.withdraw_evidence_judgment(
     withdrawn_at=260,
     reason="evidence verified",
 )
+
+# 同一交易叠加多条人工判断，各自独立撤回
+engine.exclude_evidence(
+    "evt-t1",
+    "false positive review",
+    operator="analyst-1",
+    decided_at=255,
+    kind=JudgmentKind.FALSE_POSITIVE,
+    judgment_id="j-fp",
+)
+engine.exclude_evidence(
+    "evt-t1",
+    "rule exception granted",
+    operator="analyst-2",
+    decided_at=256,
+    kind=JudgmentKind.RULE_EXCEPTION,
+    judgment_id="j-ex",
+)
+# 只撤回误报判断；规则例外仍然生效，命中不会恢复
+engine.withdraw_evidence_judgment("j-fp", withdrawn_at=260)
+
+# 解释当前命中：原始事件、规则版本、参与生效的人工决定
+for hit in engine.all_hits():
+    explanation = engine.explain_hit(hit.hit_id)
+    print(explanation["rule"], explanation["active_manual_judgments"])
 
 # 用新版本规则重算，历史记录保留变化原因
 engine.replace_rule(

@@ -9,7 +9,7 @@ from antifraud.events import (
     revocation_event,
     transaction_event,
 )
-from antifraud.models import EventSource
+from antifraud.models import EventSource, JudgmentKind
 from antifraud.scoring import HeuristicModel
 
 
@@ -67,6 +67,42 @@ def main() -> None:
     )
     for decision in restored_decisions:
         print("restored", decision.cause.value, decision.evidence.status.value)
+
+    engine.exclude_evidence(
+        "evt-t1",
+        "false positive review",
+        operator="analyst-demo",
+        decided_at=270,
+        kind=JudgmentKind.FALSE_POSITIVE,
+        judgment_id="j-fp",
+    )
+    engine.exclude_evidence(
+        "evt-t1",
+        "rule exception granted",
+        operator="analyst-demo-2",
+        decided_at=271,
+        kind=JudgmentKind.RULE_EXCEPTION,
+        judgment_id="j-ex",
+    )
+    engine.withdraw_evidence_judgment(
+        "j-fp", withdrawn_at=280, reason="review overturned"
+    )
+    print(
+        "active hits after partial withdrawal:",
+        len(engine.active_hits()),
+    )
+    for hit in engine.all_hits():
+        explanation = engine.explain_hit(hit.hit_id)
+        assert explanation is not None
+        print(
+            "explain",
+            explanation["hit_id"],
+            explanation["rule"],
+            [
+                judgment.effective_id
+                for judgment in explanation["active_manual_judgments"]
+            ],
+        )
 
     engine.replace_rule(
         "cross_identity_flow",

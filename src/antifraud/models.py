@@ -20,6 +20,13 @@ class ChangeCause(str, Enum):
     SEAL = "seal"
 
 
+class JudgmentKind(str, Enum):
+    GENERIC = "generic"
+    FALSE_POSITIVE = "false_positive"
+    IDENTITY_SPLIT = "identity_split"
+    RULE_EXCEPTION = "rule_exception"
+
+
 @dataclass(frozen=True, slots=True)
 class RuleVersion:
     rule_id: str
@@ -64,10 +71,20 @@ class ManualEvidenceJudgment:
     decided_at: int
     withdrawn_at: int | None = None
     withdrawal_reason: str | None = None
+    judgment_id: str = ""
+    kind: JudgmentKind = JudgmentKind.GENERIC
+    rule_id: str | None = None
 
     @property
     def active(self) -> bool:
         return self.withdrawn_at is None
+
+    @property
+    def effective_id(self) -> str:
+        return self.judgment_id or self.event_id
+
+    def applies_to_rule(self, rule_id: str) -> bool:
+        return self.rule_id is None or self.rule_id == rule_id
 
     def withdrawn(
         self, timestamp: int, reason: str | None = None
