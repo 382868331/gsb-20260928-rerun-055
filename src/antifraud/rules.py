@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from .events import EventEnvelope, IdentityAssociation, Transaction
 from .models import (
+    ChangeCause,
     DecisionStatus,
     HitEvidence,
     RuleVersion,
@@ -15,6 +16,7 @@ from .models import (
 class RuleDecision:
     evidence: HitEvidence
     previous_status: DecisionStatus | None
+    change_cause: ChangeCause = ChangeCause.EVIDENCE
 
     @property
     def is_new(self) -> bool:
@@ -47,6 +49,9 @@ class CrossIdentityFlowRule:
     @property
     def qualified_name(self) -> str:
         return self.version_info.qualified_name
+
+    def rule_id(self) -> str:
+        return self.version_info.rule_id
 
     def evaluate(
         self, events: list[EventEnvelope]
