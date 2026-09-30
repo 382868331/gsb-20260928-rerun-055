@@ -51,6 +51,45 @@ def main() -> None:
         scored = model.apply(decision.evidence)
         print(decision.evidence.status.value, scored.hit_id, scored.model_score)
 
+    manual_decisions = engine.exclude_evidence(
+        "evt-t1",
+        "transaction disputed by analyst",
+        operator="analyst-demo",
+        decided_at=250,
+    )
+    for decision in manual_decisions:
+        print("manual", decision.cause.value, decision.evidence.status.value)
+
+    restored_decisions = engine.withdraw_evidence_judgment(
+        "evt-t1",
+        withdrawn_at=260,
+        reason="evidence verified",
+    )
+    for decision in restored_decisions:
+        print("restored", decision.cause.value, decision.evidence.status.value)
+
+    engine.replace_rule(
+        "cross_identity_flow",
+        CrossIdentityFlowRule(
+            version="v2",
+            window_seconds=300,
+            min_identities=3,
+            min_total_amount=1200,
+        ),
+    )
+    print("revision causes:", [
+        revision["cause"].value for revision in engine.hit_history()
+    ])
+    print("raw events retained:", len(engine.raw_events()))
+    print("active hits:", len(engine.active_hits()))
+    print(
+        "manual judgments:",
+        [
+            (judgment.event_id, judgment.withdrawn_at)
+            for judgment in engine.manual_judgments()
+        ],
+    )
+
     engine.ingest(
         revocation_event(
             "evt-t1",

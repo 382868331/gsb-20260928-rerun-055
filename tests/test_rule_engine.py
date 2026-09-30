@@ -10,7 +10,7 @@ from antifraud.events import (
     revocation_event,
     transaction_event,
 )
-from antifraud.models import DecisionStatus, EventSource
+from antifraud.models import ChangeCause, DecisionStatus, EventSource
 from antifraud.rules import CrossIdentityFlowRule
 
 
@@ -193,15 +193,17 @@ class CrossIdentityFlowRuleTest(unittest.TestCase):
         decisions = engine.ingest(
             tx("seal-marker", "X", "Y", 1, 61)
         )
-        late_decisions = engine.ingest_many(
-            [
-                tx("late-t0", "C", "A", 100, 20),
-            ]
-        )
+        late_decisions = engine.ingest(tx("late-t0", "C", "A", 100, 20))
 
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0].evidence.status, DecisionStatus.SEALED)
-        self.assertEqual(late_decisions, [])
+        self.assertEqual(len(late_decisions), 1)
+        self.assertEqual(
+            late_decisions[0].evidence.status, DecisionStatus.REVISED
+        )
+        self.assertEqual(
+            late_decisions[0].cause, ChangeCause.EVIDENCE
+        )
         sealed = next(
             hit
             for hit in engine.all_hits()
@@ -209,6 +211,191 @@ class CrossIdentityFlowRuleTest(unittest.TestCase):
         )
         self.assertEqual(sealed.status, DecisionStatus.SEALED)
         self.assertEqual(sealed.transaction_ids, ("t1", "t2"))
+        self.assertIn("late-t0", late_decisions[0].evidence.transaction_ids)
+
+    def test_manual_evidence_exclusion_keeps_event_and_can_be_restored(self) -> None:
+        engine = build_engine()
+        engine.ingest_many(
+            [
+                link("link-ab", "A", "B"),
+                link("link-bc", "B", "C"),
+                tx("t1", "A", "B", 500, 100),
+                tx("t2", "B", "C", 500, 200),
+            ]
+        )
+
+        decisions = engine.exclude_evidence(
+            "evt-link-bc",
+            "association not verified",
+            operator="analyst-1",
+            decided_at=250,
+        )
+
+        self.assertEqual(len(decisions), 1)
+        revoked = decisions[0].evidence
+        self.assertEqual(revoked.status, DecisionStatus.REVOKED)
+        self.assertEqual(decisions[0].cause, ChangeCause.MANUAL)
+        self.assertEqual(revoked.association_ids, ("link-ab", "link-bc"))
+        self.assertEqual(revoked.excluded_event_ids, ("evt-link-bc",))
+        self.assertEqual(
+            revoked.manual_judgments[0].reason,
+            "association not verified",
+        )
+        self.assertIn("evt-link-bc", {
+            event.event_id for event in engine.raw_events()
+        })
+        self.assertEqual(engine.active_hits(), [])
+
+        restored = engine.withdraw_evidence_judgment(
+            "evt-link-bc",
+            withdrawn_at=260,
+            reason="verified",
+        )
+
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].evidence.status, DecisionStatus.REVISED)
+        self.assertEqual(
+            restored[0].evidence.transaction_ids, ("t1", "t2")
+        )
+        self.assertEqual(restored[0].cause, ChangeCause.MANUAL)
+        self.assertEqual(
+            restored[0].evidence.excluded_event_ids, ()
+        )
+        self.assertEqual(
+            restored[0].evidence.manual_judgments[0].withdrawal_reason,
+            "verified",
+        )
+
+    def test_shared_identity_exclusion_only_affects_dependent_chain(self) -> None:
+        engine = RuleEngine(
+            [
+                CrossIdentityFlowRule(
+                    window_seconds=300,
+                    min_identities=3,
+                    min_total_amount=1200,
+                )
+            ]
+        )
+        engine.ingest_many(
+            [
+                link("abnormal-sa", "S", "A"),
+                link("abnormal-ab", "A", "B"),
+                link("abnormal-bc", "B", "C"),
+                tx("abn-1", "S", "A", 500, 100),
+                tx("abn-2", "C", "B", 400, 200),
+                tx("abn-3", "B", "C", 400, 210),
+            ]
+        )
+
+        hits = {hit.identities: hit for hit in engine.active_hits()}
+        self.assertEqual(
+            set(hits),
+            {("A", "B", "C", "S")},
+        )
+
+        decisions = engine.exclude_evidence(
+            "evt-abn-3",
+            "transaction not verified",
+            operator="analyst-2",
+            decided_at=250,
+        )
+
+        engine.ingest_many(
+            [
+                association_event(
+                    IdentityAssociation("normal-ad", "A", "D", 400),
+                    source=SOURCE,
+                ),
+                association_event(
+                    IdentityAssociation("normal-de", "D", "E", 400),
+                    source=SOURCE,
+                ),
+                tx("norm-1", "A", "D", 600, 400),
+                tx("norm-2", "D", "E", 600, 450),
+            ]
+        )
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(
+            decisions[0].evidence.identities, ("A", "B", "C", "S")
+        )
+        self.assertEqual(
+            decisions[0].evidence.status, DecisionStatus.REVOKED
+        )
+        active = {hit.identities: hit for hit in engine.active_hits()}
+        self.assertEqual(set(active), {("A", "D", "E")})
+        self.assertEqual(active[("A", "D", "E")].transaction_ids, (
+            "norm-1",
+            "norm-2",
+        ))
+
+    def test_rule_change_is_separate_from_evidence_and_manual_changes(self) -> None:
+        engine = build_engine()
+        engine.ingest_many(
+            [
+                link("link-ab", "A", "B"),
+                link("link-bc", "B", "C"),
+                tx("t1", "A", "B", 500, 100),
+                tx("t2", "B", "C", 500, 200),
+            ]
+        )
+
+        decisions = engine.replace_rule(
+            "cross_identity_flow",
+            CrossIdentityFlowRule(
+                version="v2",
+                window_seconds=300,
+                min_identities=3,
+                min_total_amount=1200,
+            ),
+        )
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].cause, ChangeCause.RULE)
+        self.assertEqual(
+            decisions[0].evidence.status, DecisionStatus.REVOKED
+        )
+        causes = [revision["cause"] for revision in engine.hit_history()]
+        self.assertIn(ChangeCause.EVIDENCE, causes)
+        self.assertIn(ChangeCause.RULE, causes)
+
+    def test_manual_change_after_seal_creates_new_version(self) -> None:
+        engine = RuleEngine(
+            [
+                CrossIdentityFlowRule(
+                    window_seconds=60,
+                    min_identities=3,
+                    min_total_amount=900,
+                )
+            ]
+        )
+        engine.ingest_many(
+            [
+                link("link-ab", "A", "B"),
+                link("link-bc", "B", "C"),
+                tx("t1", "A", "B", 500, 0),
+                tx("t2", "B", "C", 500, 10),
+                tx("marker", "X", "Y", 1, 61),
+            ]
+        )
+
+        decisions = engine.exclude_evidence(
+            "evt-t1",
+            "sealed hit evidence disputed",
+            operator="analyst-3",
+            decided_at=100,
+        )
+
+        self.assertEqual(len(decisions), 1)
+        revised = decisions[0].evidence
+        self.assertEqual(revised.status, DecisionStatus.REVOKED)
+        self.assertEqual(decisions[0].cause, ChangeCause.MANUAL)
+        sealed = next(
+            hit for hit in engine.all_hits()
+            if hit.status == DecisionStatus.SEALED
+        )
+        self.assertEqual(sealed.transaction_ids, ("t1", "t2"))
+        self.assertEqual(sealed.excluded_event_ids, ())
 
 
 if __name__ == "__main__":

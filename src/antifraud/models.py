@@ -10,6 +10,14 @@ class DecisionStatus(str, Enum):
     UPDATED = "updated"
     REVOKED = "revoked"
     SEALED = "sealed"
+    REVISED = "revised"
+
+
+class ChangeCause(str, Enum):
+    EVIDENCE = "evidence"
+    MANUAL = "manual"
+    RULE = "rule"
+    SEAL = "seal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +57,29 @@ class TriggerEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ManualEvidenceJudgment:
+    event_id: str
+    reason: str
+    operator: str
+    decided_at: int
+    withdrawn_at: int | None = None
+    withdrawal_reason: str | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.withdrawn_at is None
+
+    def withdrawn(
+        self, timestamp: int, reason: str | None = None
+    ) -> "ManualEvidenceJudgment":
+        return replace(
+            self,
+            withdrawn_at=timestamp,
+            withdrawal_reason=reason,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class HitEvidence:
     hit_id: str
     rule: RuleVersion
@@ -62,6 +93,12 @@ class HitEvidence:
     model_score: float | None = None
     model_version: str | None = None
     status: DecisionStatus = DecisionStatus.OPEN
+    excluded_event_ids: tuple[str, ...] = ()
+    manual_judgments: tuple[ManualEvidenceJudgment, ...] = ()
+
+    @property
+    def logical_key(self) -> tuple[str, int, tuple[str, ...]]:
+        return (self.rule.rule_id, self.window_start, self.identities)
 
     def sealed(self) -> "HitEvidence":
         return replace(self, status=DecisionStatus.SEALED)

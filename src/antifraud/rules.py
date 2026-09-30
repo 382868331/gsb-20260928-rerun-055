@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from .events import EventEnvelope, IdentityAssociation, Transaction
 from .models import (
+    ChangeCause,
     DecisionStatus,
     HitEvidence,
     RuleVersion,
@@ -15,6 +16,7 @@ from .models import (
 class RuleDecision:
     evidence: HitEvidence
     previous_status: DecisionStatus | None
+    cause: ChangeCause = ChangeCause.EVIDENCE
 
     @property
     def is_new(self) -> bool:
@@ -97,7 +99,6 @@ class CrossIdentityFlowRule:
         window_start: int,
         window_end: int,
     ) -> list[HitEvidence]:
-        active_associations: list[EventEnvelope] = []
         parent: dict[str, str] = {}
 
         def find(identity: str) -> str:
@@ -115,36 +116,30 @@ class CrossIdentityFlowRule:
                     left_root, right_root
                 )
 
-        for event in associations:
-            association = event.payload
-            assert isinstance(association, IdentityAssociation)
-            if not self._association_overlaps_window(
-                association, window_start, window_end
-            ):
-                continue
-            active_associations.append(event)
-            union(association.identity_a, association.identity_b)
-
         selected_by_component: dict[str, list[EventEnvelope]] = {}
-        associations_by_component: dict[str, list[EventEnvelope]] = {}
 
-        for event in window_events:
+        positive_events = [
+            event
+            for event in window_events
+            if event.payload.amount > 0
+        ]
+        for event in positive_events:
             transaction = event.payload
             assert isinstance(transaction, Transaction)
-            if transaction.amount <= 0:
-                continue
+            for association_event in associations:
+                association = association_event.payload
+                assert isinstance(association, IdentityAssociation)
+                if not self._association_supports_window(
+                    association, window_start, window_end
+                ):
+                    continue
+                union(association.identity_a, association.identity_b)
             source_root = find(transaction.from_identity)
             target_root = find(transaction.to_identity)
             if source_root != target_root:
                 continue
             component = find(source_root)
             selected_by_component.setdefault(component, []).append(event)
-
-        for event in active_associations:
-            association = event.payload
-            assert isinstance(association, IdentityAssociation)
-            component = find(association.identity_a)
-            associations_by_component.setdefault(component, []).append(event)
 
         evidence: list[HitEvidence] = []
         for component, selected in sorted(selected_by_component.items()):
@@ -153,6 +148,25 @@ class CrossIdentityFlowRule:
                 for event in selected
                 for identity in event.payload.identities
             }
+            component_association_events: list[EventEnvelope] = []
+            for event in associations:
+                association = event.payload
+                assert isinstance(association, IdentityAssociation)
+                if not (
+                    association.identity_a in selected_nodes
+                    and association.identity_b in selected_nodes
+                ):
+                    continue
+                if not self._association_supports_window(
+                    association, window_start, window_end
+                ):
+                    continue
+                if not any(
+                    association.active_at(selected_event.occurred_at)
+                    for selected_event in selected
+                ):
+                    continue
+                component_association_events.append(event)
             total_amount = sum(event.payload.amount for event in selected)
             if (
                 len(selected_nodes) < self.min_identities
@@ -163,7 +177,7 @@ class CrossIdentityFlowRule:
                 key=lambda event: (event.occurred_at, event.event_id)
             )
             component_associations = sorted(
-                associations_by_component.get(component, []),
+                component_association_events,
                 key=lambda event: (event.occurred_at, event.event_id),
             )
             transaction_ids = tuple(
@@ -182,7 +196,7 @@ class CrossIdentityFlowRule:
                 HitEvidence(
                     hit_id=self._hit_id(
                         window_start=window_start,
-                        component=component,
+                        identities=identities,
                     ),
                     rule=self.version_info,
                     window_start=window_start,
@@ -196,26 +210,32 @@ class CrossIdentityFlowRule:
             )
         return evidence
 
-    def _association_overlaps_window(
+    def _association_supports_window(
         self,
         association: IdentityAssociation,
         window_start: int,
         window_end: int,
     ) -> bool:
-        starts_before_end = association.valid_from <= window_end
-        ends_after_start = (
+        starts_during_or_before_selected_events = (
+            association.valid_from <= window_end
+        )
+        remains_active_during_window = (
             association.valid_to is None
             or association.valid_to >= window_start
         )
-        return starts_before_end and ends_after_start
+        return (
+            starts_during_or_before_selected_events
+            and remains_active_during_window
+        )
 
     def _hit_id(
         self,
         *,
         window_start: int,
-        component: str,
+        identities: tuple[str, ...],
     ) -> str:
         window_slot = window_start // self.window_seconds
+        identity_key = ",".join(identities)
         return (
-            f"{self.qualified_name}|window:{window_slot}|component:{component}"
+            f"{self.qualified_name}|window:{window_slot}|identities:{identity_key}"
         )
