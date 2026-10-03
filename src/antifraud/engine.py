@@ -256,6 +256,10 @@ class RuleEngine:
     def raw_events(self) -> list[EventEnvelope]:
         return list(self._events_by_id.values())
 
+    @property
+    def raw_events_map(self) -> dict[str, EventEnvelope]:
+        return dict(self._events_by_id)
+
     def active_hits(self) -> list[HitEvidence]:
         return [
             evidence

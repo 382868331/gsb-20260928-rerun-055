@@ -16,12 +16,66 @@
 - 历史重评：开放窗口内迟到资料继续修正当前命中；封存后的证据、人工或规则变化另成版本。
 - 原因区分：每次变化标记为 `evidence`、`manual`、`rule` 或 `seal`。
 - 模型扩展：`HeuristicModel` 是确定性占位模型，可将分数附加到规则证据。
+- 跨案件归属：`CaseBook` 允许多个案件引用同一原始交易，但只有明确归属的份额计入案件总额。
+- 争议份额：超出原始金额的重叠认领保留为 `disputed_amount`，单独展示，不会被最后一次操作覆盖。
+- 采纳前预览：份额划分、部分转移与案件合并在采纳前返回 `AttributionImpact`，列明金额、命中规则与受影响的人工判断。
+- 撤回保留：撤回单份归属决定只移除它自己的条目，其余案件已确认范围继续保留；合并撤回会恢复来源案件。
+- 封存迟到证据：封存案件的新归属形成新的 `CaseSnapshot` 修订，封存快照与历次调查解释仍可独立查看。
+- 金额复演：`CaseBook.reconcile()` 逐笔给出原始金额、已确认、争议与未归属金额，合计回到原交易金额。
 
 ## 快速验证
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 PYTHONPATH=src python -m antifraud.examples.demo
+```
+
+## 案件归属
+
+```python
+from antifraud.cases import CaseBook
+
+book = CaseBook(engine)
+book.open_case("case-alpha")
+book.open_case("case-beta")
+
+# 采纳前先预览：金额、命中规则与已有人工判断受影响的位置
+preview = book.propose_share(
+    "case-alpha",
+    {"evt-t1": 600.0},
+    operator="analyst-1",
+    rationale="alpha claim",
+)
+print(preview.lines)
+print(preview.affected_hits)
+print(preview.affected_manual_judgments)
+
+# 部分认领；重叠部分进入 disputed_amount 而不是覆盖已有归属
+book.adopt_share(
+    "case-alpha", {"evt-t1": 600.0},
+    operator="analyst-1", rationale="alpha claim",
+    decided_at=300, decision_id="alpha-t1",
+)
+book.adopt_transfer(
+    "case-alpha", "case-beta", {"evt-t2": 150.0},
+    operator="analyst-2", rationale="move part of t2",
+    decided_at=350, decision_id="move-t2",
+)
+book.adopt_merge(
+    "case-beta", "case-alpha",
+    operator="lead", rationale="consolidate cases",
+    decided_at=360, decision_id="merge-beta",
+)
+
+# 撤回单份决定，其他案件已确认范围不变
+book.withdraw_decision("move-t2", withdrawn_at=370, reason="cancelled")
+
+# 封存后迟到证据形成新修订；原封存快照保留
+snapshot = book.seal_case("case-alpha", sealed_at=400)
+original = book.case_explanation("case-alpha", revision=1)
+
+for event_id, original_amount, confirmed, disputed, unattributed in book.reconcile():
+    assert round(confirmed + disputed + unattributed, 6) == original_amount
 ```
 
 ## 基本用法

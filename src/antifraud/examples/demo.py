@@ -11,6 +11,7 @@ from antifraud.events import (
 )
 from antifraud.models import EventSource
 from antifraud.scoring import HeuristicModel
+from antifraud.cases import CaseBook
 
 
 SOURCE = EventSource(system="fictitious-lab", producer="demo")
@@ -130,6 +131,52 @@ def main() -> None:
         )
     )
     print("active hits after revocation:", len(engine.active_hits()))
+
+    book = CaseBook(engine)
+    book.open_case("case-alpha")
+    book.open_case("case-beta")
+    preview = book.propose_share(
+        "case-alpha",
+        {"evt-t2": 500.0},
+        operator="analyst-demo",
+        rationale="alpha claims t2",
+    )
+    print(
+        "preview affected rules:",
+        sorted({hit.rule for hit in preview.affected_hits}),
+    )
+    book.adopt_share(
+        "case-alpha",
+        {"evt-t2": 500.0},
+        operator="analyst-demo",
+        rationale="alpha claims t2",
+        decided_at=300,
+        decision_id="alpha-t2",
+    )
+    book.adopt_share(
+        "case-beta",
+        {"evt-t3": 300.0},
+        operator="analyst-demo",
+        rationale="beta claims part of t3",
+        decided_at=310,
+        decision_id="beta-t3",
+    )
+    sealed = book.seal_case("case-alpha", sealed_at=400)
+    print("sealed alpha total:", sealed.confirmed_total)
+    book.adopt_share(
+        "case-alpha",
+        {"evt-t3": 100.0},
+        operator="late-analyst",
+        rationale="late evidence for alpha",
+        decided_at=500,
+        decision_id="alpha-late",
+    )
+    print(
+        "alpha revisions:",
+        [snapshot.revision for snapshot in book.case_history("case-alpha")],
+    )
+    print("case totals:", book.case_totals())
+    print("reconciliation:", book.reconcile())
 
 
 if __name__ == "__main__":

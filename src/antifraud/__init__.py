@@ -10,6 +10,15 @@ from .models import (
     ManualJudgmentKind,
 )
 from .rules import CrossIdentityFlowRule, RuleDecision
+from .cases import (
+    AttributionDecision,
+    AttributionImpact,
+    AttributionKind,
+    CaseBook,
+    CaseSnapshot,
+    CaseStatus,
+    TransactionAttributionLine,
+)
 
 __all__ = [
     "CrossIdentityFlowRule",
@@ -23,4 +32,11 @@ __all__ = [
     "RuleDecision",
     "RuleEngine",
     "Transaction",
+    "AttributionDecision",
+    "AttributionImpact",
+    "AttributionKind",
+    "CaseBook",
+    "CaseSnapshot",
+    "CaseStatus",
+    "TransactionAttributionLine",
 ]
