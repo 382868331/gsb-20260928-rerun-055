@@ -16,6 +16,16 @@
 - 历史重评：开放窗口内迟到资料继续修正当前命中；封存后的证据、人工或规则变化另成版本。
 - 原因区分：每次变化标记为 `evidence`、`manual`、`rule` 或 `seal`。
 - 模型扩展：`HeuristicModel` 是确定性占位模型，可将分数附加到规则证据。
+- 多案件归属：多个调查案件可引用同一原始交易；只有明确归属且无人争
+  议的损失份额计入案件总额，重叠主张的份额单独标记为 `disputed`，不
+  会在多个案件中重复计损。
+- 归属提案：份额划分、合并案件、把部分份额移到另一案件都先生成提案，
+  预览展示金额变化、命中规则与受影响的人工判断，采纳后才生效。
+- 定向撤回：撤回某一份归属决定只影响该决定覆盖的范围，其余案件已确认
+  的份额保留，冲突按决定时间确定顺序，不会被最后操作覆盖。
+- 封存与复演：封存案件保留不可变快照；迟到证据或新归属使其转为
+  `revised` 并另存版本；复演时各案件合计始终回到原交易金额，历史解
+  释可独立查看。
 
 ## 快速验证
 
@@ -97,6 +107,56 @@ engine.replace_rule(
 )
 for revision in engine.hit_history():
     print(revision["cause"], revision["current"].hit_id)
+```
+
+## 多案件损失归属
+
+```python
+from antifraud.cases import CaseLedger
+
+ledger = CaseLedger(engine)
+ledger.register_case("case-a")
+ledger.register_case("case-b")
+ledger.register_transactions_from_engine()
+
+# 提案 → 预览 → 采纳
+proposal = ledger.propose_allocation(
+    case_id="case-a",
+    transaction_id="t1",
+    amount=500.0,
+    operator="analyst-1",
+    proposed_at=300,
+    reason="victim loss attributed to case-a",
+)
+print(proposal.preview.case_totals_after)   # 采纳前后的金额
+print(proposal.preview.rule_hits)           # 受影响的命中规则
+print(proposal.preview.manual_judgments)    # 受影响的人工判断
+ledger.adopt_proposal(proposal.proposal_id, adopted_at=301)
+
+# 另一案件对同一交易重复认领 → 重叠部分单独列为争议
+dup = ledger.propose_allocation(
+    case_id="case-b", transaction_id="t1", amount=500.0,
+    operator="analyst-2", proposed_at=310, reason="duplicate material",
+)
+ledger.adopt_proposal(dup.proposal_id, adopted_at=311)
+print(ledger.case_view("case-a").disputed_total)
+
+# 撤回其中一份归属决定，其余案件的确认范围保留
+ledger.withdraw_attribution("attr-1", withdrawn_at=320, reason="duplicate")
+
+# 合并案件或移动部分份额
+merge = ledger.propose_merge(
+    source_case_id="case-b", target_case_id="case-a",
+    operator="lead", proposed_at=330, reason="same investigation",
+)
+ledger.adopt_proposal(merge.proposal_id, adopted_at=331)
+
+# 封存后迟到证据另成版本；复演合计回到原交易金额
+ledger.seal_case("case-a", sealed_at=400)
+for reconciliation in ledger.replay():
+    assert reconciliation.reconciles
+for revision in ledger.case_history("case-a"):
+    print(revision.cause, revision.view.confirmed_total)
 ```
 
 ## 决策状态
